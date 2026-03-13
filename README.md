@@ -10,8 +10,8 @@
 > Решение кризиса темной энергии с помощью быстрых радиовсплесков: измерение параметра уравнения состояния темной энергии w методом кросс-корреляции CHIME-DESI
 
 Данные
-CHIME/FRB Catalog 2: https://www.chime-frb.ca/catalog
-DESI DR3: https://data.desi.lbl.gov
+CHIME/FRB: https://www.chime-frb.ca/catalog
+DESI: https://data.desi.lbl.gov
 
 
 ## Быстрый старт
