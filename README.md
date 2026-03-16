@@ -2,24 +2,18 @@
 
 # FwCC: FRB-w Cross-Correlation Analysis
 
-Код для измерения параметра уравнения состояния тёмной энергии w методом кросс-корреляции быстрых радиовсплесков с крупномасштабной структурой.
+Code for measuring the dark energy equation of state parameter w using the cross-correlation of fast radio bursts with large-scale structure.
 
-## Статья
+## Фкешсду
 
-Этот код сопровождает статью:
-> Решение кризиса темной энергии с помощью быстрых радиовсплесков: измерение параметра уравнения состояния темной энергии w методом кросс-корреляции CHIME-DESI
+This code accompanies the article:
+> Resolving the Dark Energy Crisis with Fast Radio Bursts:
+A w-Measurement from CHIME and SDSS
+Cross-Correlation
 
-Данные
+Data
 CHIME/FRB: https://www.chime-frb.ca/catalog
-DESI: https://data.desi.lbl.gov
+SDSS: https://sdss.org
 
-
-## Быстрый старт
-
-```bash
-git clone https://github.com/fwcc-project/fwcc-analysis.git
-cd fwcc-analysis
-pip install -r requirements.txt
-python src/main.py
 
 
