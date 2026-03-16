@@ -4,7 +4,7 @@
 
 Code for measuring the dark energy equation of state parameter w using the cross-correlation of fast radio bursts with large-scale structure.
 
-## Фкешсду
+## Article
 
 This code accompanies the article:
 > Resolving the Dark Energy Crisis with Fast Radio Bursts:
