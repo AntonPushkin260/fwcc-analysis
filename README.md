@@ -12,7 +12,7 @@ A w-Measurement from CHIME and SDSS
 Cross-Correlation https://doi.org/10.5281/zenodo.19072576
 
 Data
-CHIME/FRB: https://www.chime-frb.ca/catalog
+CHIME/FRB: https://www.chime-frb.ca/catalog2
 SDSS: https://sdss.org
 
 
