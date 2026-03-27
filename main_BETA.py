@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import os
 from astropy.cosmology import wCDM
-from scipy.interpolate import interp1d
+from scipy.interpolate import interp1d, RegularGridInterpolator
 from scipy.integrate import quad
 from scipy.special import j0
 from scipy.optimize import minimize
@@ -15,711 +15,620 @@ import camb
 import emcee
 import healpy as hp
 from Corrfunc.mocks import DDtheta_mocks
- 
-CHIME_CATALOG_PATH = r"catalog.csv"
-SDSS_CATALOG_PATH = r"sdss.csv"
-BASE_OUTPUT_DIR = r"output"
- 
-THETA_BINS_DEG = np.linspace(0.1, 5.0, 15)
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+BASE_DIR = r"output"
+CATALOG_FRB = r"catalog.csv"
+CATALOG_GAL = r"sdss.csv"
+
+H0 = 67.4
+Om0 = 0.315
+Obh2 = 0.0224
+sigma8 = 0.811
+ns = 0.965
+
+THETA_BINS = np.linspace(0.1, 5.0, 15)
 Z_BINS = np.arange(0.05, 0.8, 0.05)
-RANDOM_SEED = 42
 N_MOCKS = 500
-N_THREADS = max(1, cpu_count() - 2)
- 
-H0_PLANCK = 67.4
-OMEGA_M_PLANCK = 0.315
-OMEGA_B_H2 = 0.0224
-OMEGA_B = OMEGA_B_H2 / (H0_PLANCK / 100.0)**2
-SIGMA_8 = 0.811
-N_S = 0.965
- 
-FRB_Z_MEAN = 0.5
-FRB_Z_SIGMA = 0.3
-GALAXY_Z_MEAN = 0.3
-GALAXY_Z_SIGMA = 0.15
- 
-DM_MW_MODEL = 'NE2001'
- 
-def hubble_parameter(z, w, Omega_m=OMEGA_M_PLANCK, H0=H0_PLANCK):
-    Omega_DE = 1 - Omega_m
-    return H0 * np.sqrt(Omega_m * (1 + z)**3 + Omega_DE * (1 + z)**(3 * (1 + w)))
- 
-def comoving_distance(z, w, Omega_m=OMEGA_M_PLANCK, H0=H0_PLANCK):
-    cosmo = wCDM(H0=H0, Om0=Omega_m, w0=w)
-    return cosmo.comoving_distance(z).value
- 
-def growth_factor(z, w, Omega_m=OMEGA_M_PLANCK):
-    Omega_m_z = Omega_m * (1 + z)**3 / (
-        Omega_m * (1 + z)**3 + (1 - Omega_m) * (1 + z)**(3 * (1 + w))
-    )
-    gamma = 0.55 + 0.05 * (1 + w)
-    D_z = Omega_m_z**gamma
-    D_0 = Omega_m**gamma
-    return D_z / D_0
- 
-def get_camb_power_spectrum(k_vals, z_vals, w=-1.0, Omega_m=OMEGA_M_PLANCK, 
-                             H0=H0_PLANCK, sigma_8=SIGMA_8, n_s=N_S):
-    pars = camb.CAMBparams()
-    pars.set_cosmology(H0=H0, ombh2=OMEGA_B_H2, 
-                       omch2=(Omega_m - OMEGA_B) * (H0/100.0)**2, omk=0, w=w)
-    pars.InitPower.set_params(As=2.1e-9, ns=n_s)
-    pars.set_matter_power(redshifts=z_vals, kmax=max(k_vals) * 1.5)
-    results = camb.get_results(pars)
-    kh, z_vals_camb, pk = results.get_matter_power_spectrum(
-        minkh=min(k_vals), maxkh=max(k_vals), npoints=len(k_vals))
-    P_kz = np.zeros((len(k_vals), len(z_vals)))
-    for i, z in enumerate(z_vals):
-        interp_pk = interp1d(kh, pk[:, i], kind='cubic', 
-                            bounds_error=False, fill_value=0.0)
-        P_kz[:, i] = interp_pk(k_vals)
-    return P_kz
- 
-def matter_power_spectrum_approx(k, z, w, Omega_m=OMEGA_M_PLANCK, 
-                                  sigma_8=SIGMA_8, n_s=N_S):
-    h = H0_PLANCK / 100.0
-    D_z = growth_factor(z, w, Omega_m)
-    k_eq = Omega_m * h**2 / 14.4
-    P_k = sigma_8**2 * (k / 0.2)**n_s * (1 + (k / k_eq)**2)**(-2)
-    k = np.atleast_1d(k)
-    z = np.atleast_1d(z)
-    if len(z) == 1:
-        return P_k * D_z**2
-    else:
-        return P_k[:, np.newaxis] * (D_z**2)[np.newaxis, :]
- 
-def compute_theoretical_xi_limber_vectorized(theta_bins, z_bins, w, params, 
-                                               use_camb=True):
-    n_bins = len(theta_bins) - 1
-    xi_model = np.zeros(n_bins)
-    Omega_m = params.get('Omega_m', OMEGA_M_PLANCK)
-    H0 = params.get('H0', H0_PLANCK)
-    b_g = params.get('galaxy_bias', 1.5)
-    b_FRB = params.get('FRB_bias', 1.2)
-    A_norm = params.get('A_norm', 1.0)
-    k_min, k_max = 0.001, 10.0
-    k_vals = np.logspace(np.log10(k_min), np.log10(k_max), 200)
-    z_integration = np.linspace(z_bins[0], z_bins[-1], 50)
-    W_FRB = frb_selection_function(z_integration)
-    W_gal = galaxy_selection_function(z_integration)
-    if use_camb:
-        P_kz = get_camb_power_spectrum(k_vals, z_integration, w, Omega_m, H0)
-    else:
-        P_kz = matter_power_spectrum_approx(k_vals, z_integration, w, Omega_m)
-    if P_kz.shape[0] != len(k_vals):
-        P_kz = P_kz.T
-    D_z = growth_factor(z_integration, w, Omega_m)
-    chi_z = comoving_distance(z_integration, w, Omega_m, H0) / 1000.0
-    theta_centers = (theta_bins[:-1] + theta_bins[1:]) / 2
-    theta_rad = np.radians(theta_centers)
-    for i in range(n_bins):
-        theta = theta_rad[i]
-        arg = np.outer(k_vals, chi_z) * theta
-        j0_vals = j0(arg)
-        W_z = W_FRB * W_gal * (z_integration[1] - z_integration[0])
-        integrand = (k_vals[:, np.newaxis] * P_kz * j0_vals * 
-                     W_z[np.newaxis, :] * D_z[np.newaxis, :]**2)
-        xi_k = np.trapz(integrand, k_vals, axis=0)
-        xi_theta = np.trapz(xi_k, z_integration)
-        xi_model[i] = A_norm * b_g * b_FRB * xi_theta * 1e-4
-    return xi_model
- 
-def frb_selection_function(z, z_mean=FRB_Z_MEAN, z_sigma=FRB_Z_SIGMA):
-    if np.isscalar(z):
-        if z <= 0:
-            return 0.0
-        return (z / z_mean)**2 * np.exp(-2 * z / z_mean)
-    else:
-        W_z = np.zeros_like(z)
-        mask = z > 0
-        W_z[mask] = (z[mask] / z_mean)**2 * np.exp(-2 * z[mask] / z_mean)
-        return W_z / np.max(W_z)
- 
-def galaxy_selection_function(z, z_mean=GALAXY_Z_MEAN, z_sigma=GALAXY_Z_SIGMA):
-    W_z = np.exp(-0.5 * ((z - z_mean) / z_sigma)**2)
-    return W_z / np.max(W_z)
- 
-def create_survey_mask_from_data(ra, dec, nside=64):
-    npix = hp.nside2npix(nside)
-    mask = np.zeros(npix, dtype=bool)
-    theta = np.pi/2 - np.radians(dec)
-    phi = np.radians(ra)
-    indices = hp.ang2pix(nside, theta, phi)
-    mask[np.unique(indices)] = True
-    return mask, nside
- 
-def apply_survey_mask(ra_mock, dec_mock, mask, nside):
-    theta = np.pi/2 - np.radians(dec_mock)
-    phi = np.radians(ra_mock)
-    indices = hp.ang2pix(nside, theta, phi)
-    mask_applied = mask[indices]
-    return ra_mock[mask_applied], dec_mock[mask_applied]
- 
-def generate_random_catalog(n_random, ra_data, dec_data, mask, nside, seed=None):
-    if seed is not None:
-        np.random.seed(seed)
-    
-    npix = hp.nside2npix(nside)
-    valid_pixels = np.where(mask)[0]
-    
-    n_per_pixel = int(np.ceil(n_random / len(valid_pixels)))
-    ra_random_list = []
-    dec_random_list = []
-    
-    for pix in valid_pixels:
-        theta_rand = hp.pix2ang(nside, pix)[0]
-        phi_rand = np.random.uniform(0, 2*np.pi, n_per_pixel)
-        dec_rand = np.degrees(np.pi/2 - theta_rand)
-        ra_rand = np.degrees(phi_rand)
+N_PROC = max(1, cpu_count() - 2)
+
+DM_MODELS = ['NE2001', 'YMW16']
+DM_MW_DEFAULT = 45.0
+
+class FRBAnalysisPipeline:
+    def __init__(self, config=None):
+        self.config = config or {}
+        self.data = {}
+        self.mask = None
+        self.nside = 64
+        self.results = {}
+        self.cov_matrix = None
+        self.pk_interpolator = None
         
-        dec_min_data = np.min(dec_data)
-        dec_max_data = np.max(dec_data)
-        dec_mask = (dec_rand >= dec_min_data) & (dec_rand <= dec_max_data)
+        if not os.path.exists(BASE_DIR):
+            os.makedirs(BASE_DIR)
+            os.makedirs(os.path.join(BASE_DIR, 'plots'))
+
+    def load_data(self):
+        df_frb = pd.read_csv(CATALOG_FRB)
         
-        ra_random_list.extend(ra_rand[dec_mask])
-        dec_random_list.extend(dec_rand[dec_mask])
-    
-    ra_random = np.array(ra_random_list)
-    dec_random = np.array(dec_random_list)
-    
-    if len(ra_random) > n_random:
-        shuffle_idx = np.random.choice(len(ra_random), n_random, replace=False)
-        ra_random = ra_random[shuffle_idx]
-        dec_random = dec_random[shuffle_idx]
-    
-    while len(ra_random) < n_random:
-        n_extra = n_random - len(ra_random)
-        pix_extra = np.random.choice(valid_pixels, n_extra * 2)
-        theta_extra = hp.pix2ang(nside, pix_extra)[0]
-        phi_extra = np.random.uniform(0, 2*np.pi, n_extra * 2)
-        dec_extra = np.degrees(np.pi/2 - theta_extra)
-        ra_extra = np.degrees(phi_extra)
+        dm_mw_col = None
+        for col in ['DM_MW_NE2001', 'DM_MW_YMW16', 'DM_MW']:
+            if col in df_frb.columns:
+                dm_mw_col = col
+                break
         
-        dec_min_data = np.min(dec_data)
-        dec_max_data = np.max(dec_data)
-        dec_mask = (dec_extra >= dec_min_data) & (dec_extra <= dec_max_data)
+        if dm_mw_col is not None:
+            df_frb['DM_excess'] = df_frb['DM'] - df_frb[dm_mw_col]
+            logger.info(f"Using {dm_mw_col} for MW DM correction")
+        elif 'DM_MW_model' in self.config:
+            from frb_models import get_dm_mw
+            ra, dec = df_frb['ra'].values, df_frb['dec'].values
+            dm_mw = get_dm_mw(ra, dec, model=self.config['DM_MW_model'])
+            df_frb['DM_excess'] = df_frb['DM'] - dm_mw
+        else:
+            logger.warning(f"No DM MW model found, using default {DM_MW_DEFAULT} pc cm^-3")
+            df_frb['DM_excess'] = df_frb['DM'] - DM_MW_DEFAULT
         
-        ra_random = np.concatenate([ra_random, ra_extra[dec_mask]])
-        dec_random = np.concatenate([dec_random, dec_extra[dec_mask]])
-    
-    return ra_random[:n_random], dec_random[:n_random]
- 
-def compute_cross_correlation_corrfunc(frb_catalog, galaxy_bins, theta_bins, 
-                                        random_catalogs=None, n_random_factor=10,
-                                        survey_mask=None, nside=None):
-    n_theta_bins = len(theta_bins) - 1
-    xi_measurements = np.zeros(n_theta_bins)
-    xi_errors = np.zeros(n_theta_bins)
-    n_pairs = np.zeros(n_theta_bins)
-    
-    print(f"Computing cross-correlation for {len(frb_catalog)} FRBs (Corrfunc DDtheta)...")
-    
-    frb_ra = frb_catalog['ra'].values
-    frb_dec = frb_catalog['dec'].values
-    frb_dm_excess = frb_catalog.get('DM_excess', np.zeros(len(frb_catalog))).values
-    
-    if random_catalogs is None:
-        print("  Generating random catalogs...")
-        random_catalogs = {}
-        for (z_min, z_max), bin_data in galaxy_bins.items():
+        if 'z_type' in df_frb.columns:
+            df_frb = df_frb[df_frb['z_type'] == 'spec']
+        
+        self.data['frb'] = df_frb.reset_index(drop=True)
+        logger.info(f"Loaded {len(self.data['frb'])} FRBs with spectroscopic redshifts")
+        
+        df_gal = pd.read_csv(CATALOG_GAL, low_memory=False)
+        
+        col_mapping = {}
+        for col in df_gal.columns:
+            if col.lower() in ['ra', 'ra_j2000', 'raj2000']:
+                col_mapping[col] = 'ra'
+            elif col.lower() in ['dec', 'dec_j2000', 'decj2000']:
+                col_mapping[col] = 'dec'
+            elif col.lower() in ['z', 'redshift', 'z_spec']:
+                col_mapping[col] = 'z'
+        
+        df_gal = df_gal.rename(columns=col_mapping)
+        
+        required_cols = ['ra', 'dec', 'z']
+        for col in required_cols:
+            if col not in df_gal.columns:
+                raise ValueError(f"Required column {col} not found in galaxy catalog")
+        
+        df_gal['z'] = pd.to_numeric(df_gal['z'], errors='coerce')
+        df_gal = df_gal.dropna(subset=['ra', 'dec', 'z'])
+        
+        z_min, z_max = Z_BINS[0], Z_BINS[-1]
+        df_gal = df_gal[(df_gal['z'] >= z_min) & (df_gal['z'] < z_max)]
+        
+        self.data['gal_bins'] = {}
+        self.data['dz_distributions'] = {}
+        self.data['gal_weights'] = {}
+        
+        for i in range(len(Z_BINS) - 1):
+            zmin, zmax = Z_BINS[i], Z_BINS[i+1]
+            mask_z = (df_gal['z'] >= zmin) & (df_gal['z'] < zmax)
+            bin_data = df_gal[mask_z][['ra', 'dec', 'z']].reset_index(drop=True)
+            self.data['gal_bins'][(zmin, zmax)] = bin_data
+            
             if len(bin_data) > 0:
-                n_random = len(bin_data) * n_random_factor
-                ra_rand, dec_rand = generate_random_catalog(
-                    n_random, bin_data['ra'].values, bin_data['dec'].values,
-                    survey_mask, nside, seed=RANDOM_SEED
-                )
-                random_catalogs[(z_min, z_max)] = pd.DataFrame({
-                    'ra': ra_rand, 'dec': dec_rand
-                })
-    
-    for i in range(n_theta_bins):
-        theta_min_rad = np.radians(theta_bins[i])
-        theta_max_bin_rad = np.radians(theta_bins[i+1])
+                z_hist, z_edges = np.histogram(bin_data['z'].values, bins=30, density=True)
+                z_centers = (z_edges[:-1] + z_edges[1:]) / 2
+                self.data['dz_distributions'][(zmin, zmax)] = (z_centers, z_hist)
+                
+                completeness = len(bin_data) / len(df_gal[mask_z]) if len(df_gal[mask_z]) > 0 else 1.0
+                self.data['gal_weights'][(zmin, zmax)] = completeness
         
-        xi_sum = 0.0
-        xi_sq_sum = 0.0
-        pair_count = 0
+        logger.info(f"Created {len(self.data['gal_bins'])} galaxy redshift bins")
+
+    def create_mask(self):
+        all_ra, all_dec = [], []
+        for bin_df in self.data['gal_bins'].values():
+            if len(bin_df) > 0:
+                all_ra.extend(bin_df['ra'].values)
+                all_dec.extend(bin_df['dec'].values)
         
-        for (z_min, z_max), bin_data in galaxy_bins.items():
-            if len(bin_data) == 0:
-                continue
+        if len(all_ra) == 0:
+            logger.warning("No galaxies found for mask creation")
+            self.mask = np.ones(hp.nside2npix(self.nside), dtype=bool)
+            return self.mask
+        
+        all_ra, all_dec = np.array(all_ra), np.array(all_dec)
+        
+        npix = hp.nside2npix(self.nside)
+        mask = np.zeros(npix, dtype=bool)
+        theta = np.pi/2 - np.radians(all_dec)
+        phi = np.radians(all_ra)
+        indices = hp.ang2pix(self.nside, theta, phi)
+        mask[np.unique(indices)] = True
+        self.mask = mask
+        logger.info(f"Survey mask created: {np.sum(mask)}/{npix} pixels")
+        return mask
+
+    def _get_rand_cat(self, n_rand, ra_data, dec_data, seed=42):
+        np.random.seed(seed)
+        valid_pix = np.where(self.mask)[0]
+        
+        if len(valid_pix) == 0:
+            logger.warning("No valid pixels in mask, using full sky")
+            valid_pix = np.arange(hp.nside2npix(self.nside))
+        
+        rra, rdec = [], []
+        npix_per = int(np.ceil(n_rand / len(valid_pix)))
+        
+        for pix in valid_pix:
+            theta_p = hp.pix2ang(self.nside, pix)[0]
+            phi_p = np.random.uniform(0, 2*np.pi, npix_per)
+            dec_p = np.degrees(np.pi/2 - theta_p)
+            ra_p = np.degrees(phi_p)
             
-            gal_ra = bin_data['ra'].values
-            gal_dec = bin_data['dec'].values
-            
-            if (z_min, z_max) in random_catalogs:
-                rand_ra = random_catalogs[(z_min, z_max)]['ra'].values
-                rand_dec = random_catalogs[(z_min, z_max)]['dec'].values
-                alpha = len(bin_data) / len(random_catalogs[(z_min, z_max)])
+            if len(dec_data) > 0:
+                dec_min, dec_max = np.min(dec_data), np.max(dec_data)
+                margin = (dec_max - dec_min) * 0.1
+                msk = (dec_p >= dec_min - margin) & (dec_p <= dec_max + margin)
             else:
-                alpha = 1.0
-                rand_ra = None
-                rand_dec = None
+                msk = np.ones(len(dec_p), dtype=bool)
             
-            bin_edges_deg = np.array([theta_bins[i], theta_bins[i+1]])
+            rra.extend(ra_p[msk])
+            rdec.extend(dec_p[msk])
+        
+        if len(rra) > n_rand:
+            idx = np.random.choice(len(rra), n_rand, replace=False)
+            rra = [rra[i] for i in idx]
+            rdec = [rdec[i] for i in idx]
             
-            DD_result = DDtheta_mocks(
-                1,
-                n_threads=N_THREADS,
-                bin_edges=bin_edges_deg,
-                RA1=frb_ra, DEC1=frb_dec,
-                RA2=gal_ra, DEC2=gal_dec,
-                verbose=False
-            )
+        return np.array(rra), np.array(rdec)
+
+    def compute_xi(self, frb_df, gal_bins, theta_bins, rand_cats=None):
+        n_bins = len(theta_bins) - 1
+        xi_meas = np.zeros(n_bins)
+        xi_err = np.zeros(n_bins)
+        n_pairs = np.zeros(n_bins)
+        
+        ra1 = frb_df['ra'].values
+        dec1 = frb_df['dec'].values
+        dm_vals = frb_df['DM_excess'].values
+        dm_errs = frb_df.get('DM_error', np.ones(len(frb_df)) * 10).values
+        n_frb = len(ra1)
+        
+        if rand_cats is None:
+            rand_cats = {}
+            for k, v in gal_bins.items():
+                if len(v) > 0:
+                    rra, rdec = self._get_rand_cat(len(v)*10, v['ra'].values, v['dec'].values)
+                    rand_cats[k] = pd.DataFrame({'ra': rra, 'dec': rdec})
+
+        for i in range(n_bins):
+            bin_edges = np.array([theta_bins[i], theta_bins[i+1]])
+            xi_sum = 0.0
+            xi_sq_sum = 0.0
+            npairs_tot = 0
             
-            if rand_ra is not None:
-                DR_result = DDtheta_mocks(
-                    1,
-                    n_threads=N_THREADS,
-                    bin_edges=bin_edges_deg,
-                    RA1=frb_ra, DEC1=frb_dec,
-                    RA2=rand_ra, DEC2=rand_dec,
-                    verbose=False
-                )
+            for z_key, gal_df in gal_bins.items():
+                if len(gal_df) == 0: continue
                 
-                n_data = DD_result['npairs']
-                n_random = DR_result['npairs']
+                ra2 = gal_df['ra'].values
+                dec2 = gal_df['dec'].values
+                n_gal = len(ra2)
                 
-                if n_random > 0:
-                    delta_g = (n_data / (alpha * n_random)) - 1
+                if z_key in rand_cats:
+                    rra = rand_cats[z_key]['ra'].values
+                    rdec = rand_cats[z_key]['dec'].values
+                    n_rand = len(rra)
+                    alpha = n_gal / n_rand if n_rand > 0 else 1.0
                 else:
-                    delta_g = 0.0
-            else:
-                n_data = DD_result['npairs']
-                sky_area = 2 * np.pi * (
-                    np.cos(theta_min_rad) - np.cos(theta_max_bin_rad)
-                )
-                mean_density = len(bin_data) / (4 * np.pi)
-                n_expected = mean_density * sky_area
-                delta_g = (n_data / n_expected) - 1 if n_expected > 0 else 0.0
-            
-            if n_data > 0:
-                for frb_idx in range(len(frb_ra)):
-                    dm_val = frb_dm_excess[frb_idx]
+                    rra, rdec = None, None
+                    alpha = 1.0
+                
+                try:
+                    res_dd = DDtheta_mocks(1, n_threads=N_PROC, bin_edges=bin_edges, 
+                                           RA1=ra1, DEC1=dec1, RA2=ra2, DEC2=dec2, verbose=False)
+                    n_dd = res_dd['npairs'][0] if hasattr(res_dd['npairs'], '__len__') else res_dd['npairs']
+                except Exception as e:
+                    logger.warning(f"DDtheta failed for bin {z_key}: {e}")
+                    continue
+                
+                if rra is not None and len(rra) > 0:
+                    try:
+                        res_dr = DDtheta_mocks(1, n_threads=N_PROC, bin_edges=bin_edges,
+                                               RA1=ra1, DEC1=dec1, RA2=rra, DEC2=rdec, verbose=False)
+                        n_dr = res_dr['npairs'][0] if hasattr(res_dr['npairs'], '__len__') else res_dr['npairs']
+                        
+                        delta_g = (n_dd / (alpha * n_dr)) - 1.0 if n_dr > 0 else 0.0
+                    except:
+                        delta_g = 0.0
+                else:
+                    theta_min_rad = np.radians(theta_bins[i])
+                    theta_max_rad = np.radians(theta_bins[i+1])
+                    sky_area = 2 * np.pi * (np.cos(theta_min_rad) - np.cos(theta_max_rad))
+                    mean_density = n_gal / (4 * np.pi)
+                    n_expected = mean_density * sky_area * n_frb
+                    delta_g = (n_dd / n_expected) - 1.0 if n_expected > 0 else 0.0
+
+                for frb_idx in range(n_frb):
+                    dm_val = dm_vals[frb_idx]
                     xi_sum += dm_val * delta_g
                     xi_sq_sum += (dm_val * delta_g)**2
-                    pair_count += n_data
+                
+                npairs_tot += n_dd
+            
+            if npairs_tot > 0:
+                xi_meas[i] = xi_sum / npairs_tot
+                variance = (xi_sq_sum / npairs_tot) - xi_meas[i]**2
+                if variance < 0:
+                    variance = np.mean(dm_errs**2) * (delta_g**2 if 'delta_g' in locals() else 1.0)
+                xi_err[i] = np.sqrt(variance) / np.sqrt(npairs_tot)
+                n_pairs[i] = npairs_tot
+            else:
+                xi_meas[i] = np.nan
+                xi_err[i] = np.nan
+                n_pairs[i] = 0
+            
+        return xi_meas, xi_err, n_pairs
+
+    def precompute_power_spectra(self, w_values, z_values, k_values):
+        logger.info(f"Precomputing P(k,z) grid: {len(w_values)} w values, {len(z_values)} z values")
+        pk_grid = np.zeros((len(w_values), len(z_values), len(k_values)))
         
-        if pair_count > 0:
-            xi_measurements[i] = xi_sum / pair_count
-            xi_errors[i] = np.sqrt(xi_sq_sum / pair_count - xi_measurements[i]**2) / np.sqrt(pair_count)
-        else:
-            xi_measurements[i] = np.nan
-            xi_errors[i] = np.nan
+        for iw, w in enumerate(w_values):
+            try:
+                pars = camb.CAMBparams()
+                pars.set_cosmology(H0=H0, ombh2=Obh2, omch2=(Om0 - Obh2/(H0/100)**2)*(H0/100)**2, w=w)
+                pars.InitPower.set_params(As=2.1e-9, ns=ns)
+                pars.set_matter_power(redshifts=z_values, kmax=10.0)
+                res = camb.get_results(pars)
+                kh, _, pk = res.get_matter_power_spectrum(minkh=0.001, maxkh=10.0, npoints=len(k_values))
+                
+                for iz in range(len(z_values)):
+                    interp_func = interp1d(kh, pk[:,iz], bounds_error=False, fill_value=0.0)
+                    pk_grid[iw, iz, :] = interp_func(k_values)
+                
+                logger.info(f"  w={w:.2f} done")
+            except Exception as e:
+                logger.error(f"CAMB failed for w={w}: {e}")
+                pk_grid[iw, :, :] = 0.0
         
-        n_pairs[i] = pair_count
+        self.pk_interpolator = RegularGridInterpolator(
+            (w_values, z_values, k_values), pk_grid, bounds_error=False, fill_value=0.0
+        )
+        self._pk_w_values = w_values
+        self._pk_z_values = z_values
+        self._pk_k_values = k_values
+        return self.pk_interpolator
+
+    def get_pk_fast(self, k, z, w):
+        if self.pk_interpolator is None:
+            k_vals = np.logspace(-3, 1, 100)
+            z_vals = np.linspace(0.0, 2.0, 50)
+            w_vals = np.linspace(-1.5, -0.5, 11)
+            self.precompute_power_spectra(w_vals, z_vals, k_vals)
         
-        if (i + 1) % 5 == 0:
-            print(f"  Theta bin {i+1}/{n_theta_bins} complete")
-    
-    return xi_measurements, xi_errors, n_pairs
- 
-def generate_mock_frb_catalog(n_frb, z_bins, theta_bins, ra_data=None, dec_data=None,
-                               seed=None, survey_mask=None, nside=None):
-    if seed is not None:
+        k = np.atleast_1d(k)
+        points = np.column_stack([np.full_like(k, w), np.full_like(k, z), k])
+        return self.pk_interpolator(points)
+
+    def get_model_xi(self, theta_bins, w, params):
+        return compute_theory_xi_with_bins(theta_bins, self.data['dz_distributions'], 
+                                           self.data['frb']['z'].values, w, params, 
+                                           self.get_pk_fast)
+
+    def generate_mock_catalog(self, frb_df, gal_bins, seed=0, cosmic_variance=True):
         np.random.seed(seed)
-    n_frb_actual = max(n_frb, 4)
-    if ra_data is not None and dec_data is not None:
-        ra = np.random.uniform(np.min(ra_data), np.max(ra_data), n_frb_actual * 2)
-        dec = np.random.uniform(np.min(dec_data), np.max(dec_data), n_frb_actual * 2)
-        chime_mask = (dec >= -15) & (dec <= 90)
-        ra = ra[chime_mask][:n_frb_actual]
-        dec = dec[chime_mask][:n_frb_actual]
-        if len(ra) < n_frb_actual:
-            ra = np.random.uniform(0, 360, n_frb_actual)
-            dec = np.random.uniform(-10, 90, n_frb_actual)
-    else:
-        ra = np.random.uniform(0, 360, n_frb_actual)
-        dec = np.random.uniform(-10, 90, n_frb_actual)
-    z = np.random.gamma(2.5, 0.4, n_frb_actual)
-    z = np.clip(z, 0.01, 2.0)
-    dm_igm = dm_igm_macquart(z, -1.0)
-    dm_host = np.random.normal(50 / (1 + z), 30 / (1 + z))
-    dm_mw = get_dm_mw_model(ra, dec, model=DM_MW_MODEL)
-    dm_excess = dm_igm + dm_host + np.random.normal(0, 10, n_frb_actual)
-    frb_mock = pd.DataFrame({
-        'ra': ra, 'dec': dec, 'z': z, 'DM_excess': dm_excess,
-        'DM_error': np.random.normal(5, 2, n_frb_actual), 'z_type': 'spec'
-    })
-    return frb_mock
- 
-def generate_mock_galaxy_catalog(n_galaxies, z_bins, ra_data=None, dec_data=None, 
-                                  seed=None, survey_mask=None, nside=None):
-    if seed is not None:
-        np.random.seed(seed + 1000)
-    if ra_data is not None and dec_data is not None and survey_mask is not None:
-        ra_rand, dec_rand = generate_random_catalog(
-            n_galaxies, ra_data, dec_data, survey_mask, nside, seed=seed
-        )
-        ra = ra_rand
-        dec = dec_rand
-    else:
-        ra = np.random.uniform(0, 360, n_galaxies)
-        dec = np.arcsin(np.random.uniform(-1, 1, n_galaxies)) * 180 / np.pi
-    z = np.random.beta(2, 5, n_galaxies) * 0.8 + 0.05
-    galaxy_mock = pd.DataFrame({'ra': ra, 'dec': dec, 'z': z})
-    return galaxy_mock
- 
-def compute_single_mock_xi_corrected(args):
-    mock_idx, frb_catalog, galaxy_bins, theta_bins, seed, survey_mask, nside, random_catalogs = args
-    np.random.seed(seed)
-    all_ra_frb = frb_catalog['ra'].values if len(frb_catalog) > 0 else None
-    all_dec_frb = frb_catalog['dec'].values if len(frb_catalog) > 0 else None
-    frb_mock = generate_mock_frb_catalog(
-        n_frb=len(frb_catalog), z_bins=None, theta_bins=theta_bins,
-        ra_data=all_ra_frb, dec_data=all_dec_frb, seed=seed,
-        survey_mask=survey_mask, nside=nside
-    )
-    all_ra_gal = []
-    all_dec_gal = []
-    for bin_data in galaxy_bins.values():
-        if len(bin_data) > 0:
-            all_ra_gal.extend(bin_data['ra'].values)
-            all_dec_gal.extend(bin_data['dec'].values)
-    galaxy_bins_mock = {}
-    for i, (z_key, bin_data) in enumerate(galaxy_bins.items()):
-        z_min, z_max = z_key
-        n_gal = len(bin_data)
-        gal_mock = generate_mock_galaxy_catalog(
-            n_galaxies=n_gal, z_bins=[z_min, z_max],
-            ra_data=np.array(all_ra_gal), dec_data=np.array(all_dec_gal),
-            seed=seed + i * 1000, survey_mask=survey_mask, nside=nside
-        )
-        galaxy_bins_mock[z_key] = gal_mock[['ra', 'dec', 'z']].reset_index(drop=True)
-    xi_mock, _, _ = compute_cross_correlation_corrfunc(
-        frb_mock, galaxy_bins_mock, theta_bins,
-        random_catalogs=random_catalogs, n_random_factor=10,
-        survey_mask=survey_mask, nside=nside
-    )
-    return xi_mock
- 
-def estimate_covariance_from_mocks(frb_catalog, galaxy_bins, theta_bins,
-                                    z_bins, n_mocks=N_MOCKS, seed_base=42,
-                                    survey_mask=None, nside=None):
-    print(f"Estimating covariance matrix from {n_mocks} mock catalogs...")
-    print(f"  Using {N_THREADS} parallel threads")
-    n_theta_bins = len(theta_bins) - 1
-    xi_mocks = np.zeros((n_mocks, n_theta_bins))
-    all_ra_gal = []
-    all_dec_gal = []
-    for bin_data in galaxy_bins.values():
-        if len(bin_data) > 0:
-            all_ra_gal.extend(bin_data['ra'].values)
-            all_dec_gal.extend(bin_data['dec'].values)
-    all_ra_gal = np.array(all_ra_gal)
-    all_dec_gal = np.array(all_dec_gal)
-    if survey_mask is None:
-        survey_mask, nside = create_survey_mask_from_data(all_ra_gal, all_dec_gal)
-    random_catalogs = {}
-    for i in range(len(z_bins) - 1):
-        z_min, z_max = z_bins[i], z_bins[i+1]
-        bin_data = galaxy_bins[(z_min, z_max)]
-        if len(bin_data) > 0:
-            n_random = len(bin_data) * 10
-            ra_rand, dec_rand = generate_random_catalog(
-                n_random, bin_data['ra'].values, bin_data['dec'].values,
-                survey_mask, nside, seed=seed_base
-            )
-            random_catalogs[(z_min, z_max)] = pd.DataFrame({'ra': ra_rand, 'dec': dec_rand})
-    start_time = time.time()
-    args_list = [(m, frb_catalog, galaxy_bins, theta_bins, seed_base + m,
-                  survey_mask, nside, random_catalogs) for m in range(n_mocks)]
-    with Pool(processes=N_THREADS) as pool:
-        results = pool.map(compute_single_mock_xi_corrected, args_list)
-    for m, xi_mock in enumerate(results):
-        xi_mocks[m, :] = xi_mock
-        if (m + 1) % 100 == 0:
-            elapsed = time.time() - start_time
-            print(f"  Mock {m+1}/{n_mocks} complete ({elapsed/60:.1f} min elapsed)")
-    xi_mean = np.mean(xi_mocks, axis=0)
-    cov_matrix = np.cov(xi_mocks, rowvar=False)
-    cov_matrix = (cov_matrix + cov_matrix.T) / 2
-    eigvals, eigvecs = np.linalg.eigh(cov_matrix)
-    eigvals = np.clip(eigvals, 1e-10, None)
-    cov_matrix = (eigvecs * eigvals) @ eigvecs.T
-    N_data = n_theta_bins
-    hartlap_factor = (n_mocks - N_data - 2) / (n_mocks - 1)
-    cov_matrix = cov_matrix / hartlap_factor
-    elapsed = time.time() - start_time
-    print(f"  Covariance matrix computed: shape={cov_matrix.shape}")
-    print(f"  Condition number: {np.linalg.cond(cov_matrix):.2e}")
-    print(f"  Total time: {elapsed/60:.1f} minutes")
-    return cov_matrix, xi_mocks, xi_mean
- 
-def dm_igm_macquart(z, w, f_IGM=0.84, Omega_m=OMEGA_M_PLANCK,
-                    Omega_b=OMEGA_B, H0=H0_PLANCK):
-    h = H0 / 100.0
-    K = 855 * h * Omega_b * f_IGM
-    def integrand(z_prime):
-        H_z = hubble_parameter(z_prime, w, Omega_m, H0)
-        return (1 + z_prime) / H_z
-    if np.isscalar(z):
-        integral, _ = quad(integrand, 0, max(z, 0), limit=100)
-    else:
-        integral = np.array([quad(integrand, 0, max(zi, 0), limit=100)[0] for zi in z])
-    return K * integral
- 
-def get_dm_mw_model(ra, dec, model='NE2001'):
-    if model == 'YMW16':
-        base_dm = 45
-        scatter = 25
-    else:
-        base_dm = 50
-        scatter = 30
-    
-    gal_lat = np.sin(np.radians(dec))
-    dm_direction = base_dm / (1 + np.abs(gal_lat)**2)
-    return dm_direction + np.random.normal(0, scatter, size=np.asarray(ra).shape)
- 
-def log_likelihood_w(w, xi_obs, xi_model_func, theta_bins, z_bins, cov_matrix, params):
-    w_val = w[0] if isinstance(w, (list, np.ndarray)) else w
-    xi_th = xi_model_func(theta_bins, z_bins, w_val, params)
-    valid = ~np.isnan(xi_obs) & ~np.isnan(xi_th)
-    if np.sum(valid) < 2:
-        return -np.inf
-    xi_obs_valid = xi_obs[valid]
-    xi_th_valid = xi_th[valid]
-    cov_valid = cov_matrix[np.ix_(valid, valid)]
-    try:
-        cov_inv = np.linalg.inv(cov_valid)
-    except np.linalg.LinAlgError:
-        cov_inv = np.linalg.pinv(cov_valid)
-    residual = xi_obs_valid - xi_th_valid
-    log_like = -0.5 * np.dot(residual.T, np.dot(cov_inv, residual))
-    log_like -= 0.5 * np.log(np.linalg.det(cov_valid) + 1e-300)
-    log_like -= 0.5 * len(xi_obs_valid) * np.log(2 * np.pi)
-    return log_like
- 
-def prior_w(w):
-    w_val = w[0] if isinstance(w, (list, np.ndarray)) else w
-    if -2.0 < w_val < 0.0:
-        return 0.0
-    return -np.inf
- 
-def log_posterior_w(w, xi_obs, xi_model_func, theta_bins, z_bins, cov_matrix, params):
-    lp = prior_w(w)
-    if not np.isfinite(lp):
-        return -np.inf
-    ll = log_likelihood_w(w, xi_obs, xi_model_func, theta_bins, z_bins, cov_matrix, params)
-    return lp + ll
- 
-def estimate_w(xi_obs, theta_bins, z_bins, cov_matrix, params,
-               use_mcmc=True, nwalkers=50, nsteps=1000, burn_in=200):
-    print("\nStarting w parameter estimation...")
-    w_init = [-1.0]
-    if not use_mcmc:
-        print("  Using optimization (fast mode)...")
-        def neg_log_post(w):
-            return -log_posterior_w(
-                w, xi_obs, compute_theoretical_xi_limber_vectorized, 
-                theta_bins, z_bins, cov_matrix, params
-            )
-        result = minimize(neg_log_post, w_init, method='Nelder-Mead', bounds=[(-2.0, 0.0)])
-        if result.success:
-            w_best = result.x[0]
-            print(f"  w = {w_best:.3f} (optimization)")
-            return {'w_best': w_best, 'w_err': np.nan, 'success': True, 'samples': None}
-        else:
-            print(f"  Optimization failed: {result.message}")
-            return {'w_best': np.nan, 'w_err': np.nan, 'success': False, 'samples': None}
-    else:
-        print(f"  Running MCMC: {nwalkers} walkers, {nsteps} steps...")
-        pos = np.array(w_init) + 1e-4 * np.random.randn(nwalkers, 1)
-        sampler = emcee.EnsembleSampler(
-            nwalkers, 1,
-            lambda theta: log_posterior_w(
-                theta, xi_obs, compute_theoretical_xi_limber_vectorized, 
-                theta_bins, z_bins, cov_matrix, params
-            )
-        )
-        sampler.run_mcmc(pos, nsteps, progress=True)
+        
+        frb_mock = frb_df.copy()
+        
+        if cosmic_variance:
+            z_frb = frb_mock['z'].values
+            delta_z = np.diff(Z_BINS)[0]
+            n_bins_z = int(2.0 / delta_z)
+            
+            power_spectrum_amp = 0.1
+            fluctuations = np.random.normal(0, power_spectrum_amp, n_bins_z)
+            
+            for i, z in enumerate(z_frb):
+                bin_idx = min(int(z / delta_z), n_bins_z - 1)
+                fluctuation = 1.0 + fluctuations[bin_idx]
+                frb_mock.loc[i, 'DM_excess'] *= fluctuation
+        
+        dm_errors = frb_mock.get('DM_error', np.ones(len(frb_mock)) * 10).values
+        noise = np.random.normal(0, dm_errors, len(frb_mock))
+        frb_mock['DM_excess'] = frb_mock['DM_excess'].values + noise
+        
+        gal_bins_mock = {}
+        for z_key, gal_df in gal_bins.items():
+            gal_mock = gal_df.copy()
+            
+            if cosmic_variance and len(gal_mock) > 0:
+                n_gal_expected = len(gal_mock)
+                fluctuation = np.random.normal(1.0, 0.15)
+                n_gal_new = int(n_gal_expected * fluctuation)
+                n_gal_new = max(10, n_gal_new)
+                
+                if n_gal_new > len(gal_mock):
+                    extra_idx = np.random.choice(len(gal_mock), n_gal_new - len(gal_mock), replace=True)
+                    gal_extra = gal_mock.iloc[extra_idx].copy()
+                    gal_extra['z'] += np.random.normal(0, 0.01, len(gal_extra))
+                    gal_mock = pd.concat([gal_mock, gal_extra], ignore_index=True)
+                elif n_gal_new < len(gal_mock):
+                    gal_mock = gal_mock.sample(n=n_gal_new, random_state=seed)
+            
+            gal_bins_mock[z_key] = gal_mock.reset_index(drop=True)
+        
+        return frb_mock, gal_bins_mock
+
+    def estimate_covariance(self, frb_df, gal_bins, theta_bins, n_mocks=100):
+        logger.info(f"Estimating covariance from {n_mocks} mocks...")
+        n_bins = len(theta_bins) - 1
+        xi_mocks = np.zeros((n_mocks, n_bins))
+        
+        rand_cats = {}
+        for k, v in gal_bins.items():
+            if len(v) > 0:
+                rra, rdec = self._get_rand_cat(len(v)*10, v['ra'].values, v['dec'].values)
+                rand_cats[k] = pd.DataFrame({'ra': rra, 'dec': rdec})
+        
+        n_success = 0
+        for m in range(n_mocks):
+            try:
+                frb_mock, gal_bins_mock = self.generate_mock_catalog(
+                    frb_df, gal_bins, seed=m+1000, cosmic_variance=True
+                )
+                
+                xi_mock, _, _ = self.compute_xi(frb_mock, gal_bins_mock, theta_bins, rand_cats)
+                
+                if not np.all(np.isnan(xi_mock)):
+                    xi_mocks[n_success, :] = xi_mock
+                    n_success += 1
+                    
+                    if (m + 1) % 50 == 0:
+                        logger.info(f"  Mock {m+1}/{n_mocks} done ({n_success} successful)")
+            except Exception as e:
+                logger.warning(f"Mock {m} failed: {e}")
+                continue
+        
+        if n_success < 10:
+            logger.error(f"Only {n_success} successful mocks, covariance unreliable")
+            return np.eye(n_bins) * 1e-4
+        
+        xi_mocks = xi_mocks[:n_success, :]
+        logger.info(f"Using {n_success} successful mocks for covariance")
+        
+        cov_mat = np.cov(xi_mocks, rowvar=False)
+        cov_mat = (cov_mat + cov_mat.T) / 2
+        
+        eigvals = np.linalg.eigvalsh(cov_mat)
+        if np.any(eigvals < 0):
+            logger.warning("Covariance matrix not positive definite, regularizing")
+            cov_mat += np.eye(n_bins) * np.abs(np.min(eigvals)) * 1.1
+        
+        n_data = n_bins
+        if n_mocks > n_data + 2:
+            hartlap = (n_success - n_data - 2) / (n_success - 1)
+            cov_mat = cov_mat / hartlap
+            logger.info(f"Hartlap factor: {hartlap:.3f}")
+        
+        return cov_mat
+
+    def run_mcmc(self, xi_obs, cov_mat, params):
+        logger.info("Starting MCMC parameter estimation...")
+        
+        try:
+            cov_inv = np.linalg.inv(cov_mat)
+        except np.linalg.LinAlgError:
+            logger.error("Covariance matrix singular, using pseudo-inverse")
+            cov_inv = np.linalg.pinv(cov_mat)
+        
+        ndim = 2
+        nwalkers = 50
+        nsteps = 1000
+        burn_in = 200
+        
+        p0 = np.array([-1.0, 0.84]) + 1e-4 * np.random.randn(nwalkers, ndim)
+        
+        def ln_prob(p):
+            w, f_igm = p
+            if not (-2.0 < w < 0.0 and 0.0 < f_igm < 1.0):
+                return -np.inf
+            
+            p_mod = params.copy()
+            p_mod['f_IGM'] = f_igm
+            xi_mod = self.get_model_xi(THETA_BINS, w, p_mod)
+            
+            valid = ~np.isnan(xi_obs) & ~np.isnan(xi_mod)
+            if np.sum(valid) < 3:
+                return -np.inf
+            
+            diff = xi_obs[valid] - xi_mod[valid]
+            cov_valid = cov_mat[np.ix_(valid, valid)]
+            
+            try:
+                cov_inv_valid = np.linalg.inv(cov_valid)
+            except:
+                return -np.inf
+            
+            chi2 = np.dot(diff.T, np.dot(cov_inv_valid, diff))
+            return -0.5 * chi2
+
+        sampler = emcee.EnsembleSampler(nwalkers, ndim, ln_prob)
+        sampler.run_mcmc(p0, nsteps, progress=True)
+        
+        try:
+            tau = sampler.get_autocorr_time()
+            logger.info(f"Autocorrelation times: w={tau[0]:.1f}, f_IGM={tau[1]:.1f}")
+            if np.any(nsteps < 50 * tau):
+                logger.warning("MCMC may not have converged")
+        except:
+            logger.warning("Could not compute autocorrelation time")
+        
         samples = sampler.get_chain(discard=burn_in, flat=True)
-        w_samples = samples[:, 0]
-        w_samples = w_samples[np.isfinite(w_samples)]
-        if len(w_samples) < 10:
-            print("  Insufficient samples")
-            return {'w_best': -1.0, 'w_err': 0.5, 'success': True, 'samples': None}
-        w_median = np.median(w_samples)
-        w_16 = np.percentile(w_samples, 16)
-        w_84 = np.percentile(w_samples, 84)
-        w_err = (w_84 - w_16) / 2
-        print(f"  w = {w_median:.3f} +/- {w_err:.3f} (68% CI)")
-        print(f"  Range: [{w_16:.3f}, {w_84:.3f}]")
+        w_samp = samples[:, 0]
+        f_samp = samples[:, 1]
+        
+        w_med = np.median(w_samp)
+        w_lo, w_hi = np.percentile(w_samp, [16, 84])
+        f_med = np.median(f_samp)
+        f_lo, f_hi = np.percentile(f_samp, [16, 84])
+        
+        logger.info(f"w = {w_med:.3f} +{w_hi-w_med:.3f}/-{w_med-w_lo:.3f}")
+        logger.info(f"f_IGM = {f_med:.3f} +{f_hi-f_med:.3f}/-{f_med-f_lo:.3f}")
+        
         return {
-            'w_best': w_median, 'w_err': w_err, 'w_16': w_16, 'w_84': w_84,
-            'success': True, 'samples': w_samples
+            'w': w_med,
+            'w_err': (w_hi - w_lo) / 2,
+            'w_16': w_lo,
+            'w_84': w_hi,
+            'f_IGM': f_med,
+            'f_IGM_err': (f_hi - f_lo) / 2,
+            'samples': samples
         }
- 
-def load_chime_data(catalog_path, dm_mw_model='NE2001'):
-    frb_data = pd.read_csv(catalog_path)
+
+    def run(self):
+        logger.info("Starting FRB-LSS cross-correlation analysis")
+        
+        self.load_data()
+        self.create_mask()
+        
+        logger.info("Precomputing power spectra grid...")
+        k_vals = np.logspace(-3, 1, 150)
+        z_vals = np.linspace(0.0, 2.0, 60)
+        w_vals = np.linspace(-1.5, -0.5, 15)
+        self.precompute_power_spectra(w_vals, z_vals, k_vals)
+        
+        xi_list = []
+        xi_err_list = []
+        for model in DM_MODELS:
+            logger.info(f"Computing xi for DM model: {model}")
+            df_tmp = self.data['frb'].copy()
+            
+            if model == 'NE2001' and 'DM_MW_NE2001' in self.data['frb'].columns:
+                df_tmp['DM_excess'] = self.data['frb']['DM'] - self.data['frb']['DM_MW_NE2001']
+            elif model == 'YMW16' and 'DM_MW_YMW16' in self.data['frb'].columns:
+                df_tmp['DM_excess'] = self.data['frb']['DM'] - self.data['frb']['DM_MW_YMW16']
+            
+            xi, err, npairs = self.compute_xi(df_tmp, self.data['gal_bins'], THETA_BINS)
+            xi_list.append(xi)
+            xi_err_list.append(err)
+            logger.info(f"  Mean xi: {np.nanmean(xi):.3f}")
+        
+        xi_mean = np.mean(xi_list, axis=0)
+        xi_sys_err = np.std(xi_list, axis=0)
+        
+        logger.info("Estimating covariance from mocks...")
+        cov_mat = self.estimate_covariance(self.data['frb'], self.data['gal_bins'], THETA_BINS, n_mocks=N_MOCKS)
+        
+        diag_stat = np.sqrt(np.diag(cov_mat))
+        logger.info(f"Covariance diagonal: min={np.min(diag_stat):.3e}, max={np.max(diag_stat):.3e}")
+        
+        for i in range(len(xi_sys_err)):
+            if not np.isnan(xi_sys_err[i]):
+                cov_mat[i, i] += xi_sys_err[i]**2
+        
+        self.cov_matrix = cov_mat
+        
+        params = {'galaxy_bias': 1.5, 'FRB_bias': 1.2, 'A_norm': 1.0, 'Omega_m': Om0, 'H0': H0}
+        res = self.run_mcmc(xi_mean, cov_mat, params)
+        
+        self.results = res
+        
+        results_dict = {
+            'w_best': float(res['w']),
+            'w_err': float(res['w_err']),
+            'w_16': float(res.get('w_16', res['w'] - res['w_err'])),
+            'w_84': float(res.get('w_84', res['w'] + res['w_err'])),
+            'f_IGM_best': float(res['f_IGM']),
+            'f_IGM_err': float(res['f_IGM_err']),
+            'n_frb': len(self.data['frb']),
+            'n_gal_bins': len(self.data['gal_bins']),
+            'n_mocks_used': N_MOCKS,
+            'theta_bins': THETA_BINS.tolist(),
+            'dm_models_marginalized': DM_MODELS,
+            'cosmology': {'H0': H0, 'Om0': Om0, 'sigma8': sigma8},
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        with open(os.path.join(BASE_DIR, 'results.json'), 'w') as f:
+            json.dump(results_dict, f, indent=2)
+        
+        logger.info("Analysis complete. Results saved to results.json")
+        
+        if res['samples'] is not None:
+            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+            samples = res['samples']
+            
+            axes[0].hist(samples[:, 0], bins=40, alpha=0.7, label='w')
+            axes[0].axvline(res['w'], color='r', linestyle='--')
+            axes[0].axvline(-1.0, color='k', linestyle=':', label='LCDM')
+            axes[0].set_xlabel('w')
+            axes[0].legend()
+            
+            axes[1].hist(samples[:, 1], bins=40, alpha=0.7, label='f_IGM')
+            axes[1].axvline(res['f_IGM'], color='r', linestyle='--')
+            axes[1].set_xlabel('f_IGM')
+            axes[1].legend()
+            
+            plt.tight_layout()
+            plt.savefig(os.path.join(BASE_DIR, 'plots', 'posteriors.png'), dpi=300)
+            plt.close()
+
+def hubble(z, w, Om=Om0, H=H0):
+    return H * np.sqrt(Om * (1+z)**3 + (1-Om) * (1+z)**(3*(1+w)))
+
+def growth(z, w, Om=Om0):
+    Om_z = Om * (1+z)**3 / (Om * (1+z)**3 + (1-Om)*(1+z)**(3*(1+w)))
+    gamma = 0.55 + 0.05*(1+w)
+    return Om_z**gamma / Om**gamma
+
+def compute_theory_xi_with_bins(theta_bins, dz_distributions, frb_z_values, w, params, pk_func):
+    k_vals = np.logspace(-3, 1, 150)
     
-    dm_mw_col_ne2001 = 'DM_MW_NE2001'
-    dm_mw_col_ymw16 = 'DM_MW_YMW16'
-    
-    if dm_mw_model == 'YMW16' and dm_mw_col_ymw16 in frb_data.columns:
-        frb_data['DM_excess'] = frb_data['DM'] - frb_data[dm_mw_col_ymw16]
-    elif dm_mw_col_ne2001 in frb_data.columns:
-        frb_data['DM_excess'] = frb_data['DM'] - frb_data[dm_mw_col_ne2001]
-    elif 'DM' in frb_data.columns:
-        dm_mw_est = get_dm_mw_model(frb_data['ra'].values, frb_data['dec'].values, dm_mw_model)
-        frb_data['DM_excess'] = frb_data['DM'] - dm_mw_est
+    if len(frb_z_values) > 0:
+        frb_z_hist, frb_z_edges = np.histogram(frb_z_values, bins=30, density=True)
+        frb_z_centers = (frb_z_edges[:-1] + frb_z_edges[1:]) / 2
+        W_frb = frb_z_hist / np.max(frb_z_hist) if np.max(frb_z_hist) > 0 else np.ones_like(frb_z_centers) * 0.1
     else:
-        raise ValueError("DM column not found in catalog")
+        frb_z_centers = np.linspace(0.1, 1.5, 20)
+        W_frb = np.ones_like(frb_z_centers) * 0.1
     
-    for col in ['ra', 'dec']:
-        if col not in frb_data.columns:
-            raise ValueError(f"Required column {col} not found")
+    D_frb = growth(frb_z_centers, w)
     
-    print(f"Loaded {len(frb_data)} FRBs (DM_MW model: {dm_mw_model})")
-    return frb_data
- 
-def load_sdss_data(sdss_path, z_bins):
-    sdss_data = pd.read_csv(sdss_path, low_memory=False)
-    ra_col = 'ra' if 'ra' in sdss_data.columns else 'RA'
-    dec_col = 'dec' if 'dec' in sdss_data.columns else 'DEC'
-    z_col = 'z' if 'z' in sdss_data.columns else 'REDSHIFT'
-    sdss_data = sdss_data.rename(columns={ra_col: 'ra', dec_col: 'dec', z_col: 'z'})
-    sdss_data['ra'] = pd.to_numeric(sdss_data['ra'], errors='coerce')
-    sdss_data['dec'] = pd.to_numeric(sdss_data['dec'], errors='coerce')
-    sdss_data['z'] = pd.to_numeric(sdss_data['z'], errors='coerce')
-    sdss_data = sdss_data.dropna(subset=['ra', 'dec', 'z'])
-    sdss_data = sdss_data[(sdss_data['z'] >= z_bins[0]) & (sdss_data['z'] < z_bins[-1])]
-    print(f"  Loaded {len(sdss_data)} galaxies after cleaning")
-    galaxy_bins = {}
-    for i in range(len(z_bins) - 1):
-        z_min, z_max = z_bins[i], z_bins[i+1]
-        bin_data = sdss_data[(sdss_data['z'] >= z_min) & (sdss_data['z'] < z_max)].copy()
-        galaxy_bins[(z_min, z_max)] = bin_data[['ra', 'dec', 'z']].reset_index(drop=True)
-    print(f"Created {len(galaxy_bins)} galaxy redshift bins")
-    return galaxy_bins
- 
-def plot_cross_correlation(theta_bins, xi_obs, xi_errors, xi_model, output_path):
-    print(f"Plotting cross-correlation: {output_path}")
-    fig, ax = plt.subplots(figsize=(10, 6))
-    theta_centers = (theta_bins[:-1] + theta_bins[1:]) / 2
-    ax.errorbar(theta_centers, xi_obs, yerr=xi_errors, fmt='o',
-                label='Data', color='#2E86AB', capsize=3)
-    ax.plot(theta_centers, xi_model, '-', label='Model (w = -1)', color='#A23B72')
-    ax.set_xlabel('Angular Separation θ (degrees)')
-    ax.set_ylabel('ξ(θ) [pc cm⁻³]')
-    ax.set_title('FRB-LSS Cross-Correlation Function')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved: {output_path}")
- 
-def plot_w_posterior(w_result, output_path):
-    if w_result['samples'] is None:
-        return
-    print(f"Plotting w posterior: {output_path}")
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    samples = w_result['samples']
-    axes[0].hist(samples, bins=40, color='#4ECDC4', edgecolor='white', alpha=0.8, density=True)
-    axes[0].axvline(w_result['w_best'], color='red', linestyle='-', linewidth=2,
-                    label=f'median: {w_result["w_best"]:.3f}')
-    axes[0].axvline(-1.0, color='blue', linestyle=':', linewidth=1.5, label='ΛCDM (w = -1)')
-    axes[0].set_xlabel('Parameter w')
-    axes[0].set_ylabel('Probability Density')
-    axes[0].set_title('Posterior Distribution of w')
-    axes[0].legend(fontsize=9)
-    axes[0].grid(True, alpha=0.3)
-    axes[1].plot(samples, color='#2E86AB', alpha=0.5, linewidth=0.5)
-    axes[1].axhline(w_result['w_best'], color='red', linestyle='-', linewidth=1)
-    axes[1].set_xlabel('MCMC Step')
-    axes[1].set_ylabel('w')
-    axes[1].set_title('Trace Plot')
-    axes[1].grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved: {output_path}")
- 
-def main():
-    print("FwCC ANALYSIS")
-    print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Parallel threads: {N_THREADS}")
-    print(f"DM_MW Model: {DM_MW_MODEL}")
-    for d in [BASE_OUTPUT_DIR, os.path.join(BASE_OUTPUT_DIR, 'plots')]:
-        os.makedirs(d, exist_ok=True)
-    print("1. LOADING DATA")
-    frb_catalog = load_chime_data(CHIME_CATALOG_PATH, dm_mw_model=DM_MW_MODEL)
-    galaxy_bins = load_sdss_data(SDSS_CATALOG_PATH, Z_BINS)
-    if 'z_type' in frb_catalog.columns:
-        frb_catalog = frb_catalog[frb_catalog['z_type'] == 'spec'].reset_index(drop=True)
-    print(f"Using {len(frb_catalog)} localized FRBs for analysis")
-    print("Creating survey mask from data footprint...")
-    all_ra_gal = []
-    all_dec_gal = []
-    for bin_data in galaxy_bins.values():
-        if len(bin_data) > 0:
-            all_ra_gal.extend(bin_data['ra'].values)
-            all_dec_gal.extend(bin_data['dec'].values)
-    survey_mask, nside = create_survey_mask_from_data(
-        np.array(all_ra_gal), np.array(all_dec_gal)
-    )
-    print(f"  Survey mask created (nside={nside})")
-    print("2. COMPUTING CROSS-CORRELATION")
-    random_catalogs = {}
-    for (z_min, z_max), bin_data in galaxy_bins.items():
-        if len(bin_data) > 0:
-            n_random = len(bin_data) * 10
-            ra_rand, dec_rand = generate_random_catalog(
-                n_random, bin_data['ra'].values, bin_data['dec'].values,
-                survey_mask, nside, seed=RANDOM_SEED
-            )
-            random_catalogs[(z_min, z_max)] = pd.DataFrame({'ra': ra_rand, 'dec': dec_rand})
-    xi_obs, xi_errors, n_pairs = compute_cross_correlation_corrfunc(
-        frb_catalog, galaxy_bins, THETA_BINS_DEG,
-        random_catalogs=random_catalogs, n_random_factor=10,
-        survey_mask=survey_mask, nside=nside
-    )
-    plot_cross_correlation(
-        THETA_BINS_DEG, xi_obs, xi_errors,
-        compute_theoretical_xi_limber_vectorized(THETA_BINS_DEG, Z_BINS, -1.0, {}),
-        os.path.join(BASE_OUTPUT_DIR, 'plots', 'cross_correlation.png')
-    )
-    print("3. ESTIMATING COVARIANCE FROM MOCKS")
-    cov_matrix, xi_mocks, xi_mean = estimate_covariance_from_mocks(
-        frb_catalog, galaxy_bins, THETA_BINS_DEG, Z_BINS, 
-        n_mocks=N_MOCKS, survey_mask=survey_mask, nside=nside
-    )
-    np.save(os.path.join(BASE_OUTPUT_DIR, 'mock_xi_samples.npy'), xi_mocks)
-    np.save(os.path.join(BASE_OUTPUT_DIR, 'covariance_matrix.npy'), cov_matrix)
-    print("4. ESTIMATING w PARAMETER")
-    params = {
-        'galaxy_bias': 1.5, 'FRB_bias': 1.2, 'A_norm': 1.0,
-        'Omega_m': OMEGA_M_PLANCK, 'H0': H0_PLANCK
-    }
-    w_result = estimate_w(
-        xi_obs=xi_obs, theta_bins=THETA_BINS_DEG, z_bins=Z_BINS,
-        cov_matrix=cov_matrix, params=params, use_mcmc=True,
-        nwalkers=50, nsteps=1000, burn_in=200
-    )
-    if w_result['samples'] is not None:
-        plot_w_posterior(w_result, os.path.join(BASE_OUTPUT_DIR, 'plots', 'w_posterior.png'))
-    results = {
-        'w_best': float(w_result['w_best']) if not np.isnan(w_result['w_best']) else None,
-        'w_err': float(w_result['w_err']) if 'w_err' in w_result and not np.isnan(w_result['w_err']) else None,
-        'n_frb': len(frb_catalog), 'n_galaxy_bins': len(galaxy_bins),
-        'n_mocks': N_MOCKS, 'theta_bins': THETA_BINS_DEG.tolist(),
-        'dm_mw_model': DM_MW_MODEL,
-        'camb_used': True, 'limber_integral': True,
-        'growth_factor_linder2005': True,
-        'selection_functions': True, 'survey_geometry_corrected': True,
-        'random_catalogs_used': True, 'hartlap_correction': True,
-        'corrfunc_ddtheta': True,
-        'timestamp': datetime.now().isoformat()
-    }
-    with open(os.path.join(BASE_OUTPUT_DIR, 'results.json'), 'w') as f:
-        json.dump(results, f, indent=2)
-    print("RESULTS SUMMARY")
-    if w_result['success'] and not np.isnan(w_result['w_best']):
-        print(f"w = {w_result['w_best']:.3f} +/- {w_result['w_err']:.3f}")
-        sigma_dev = abs(w_result['w_best'] + 1) / w_result['w_err'] if w_result['w_err'] > 0 else 0
-        print(f"Consistency with ΛCDM: {sigma_dev:.2f}σ")
-    else:
-        print("W estimation failed")
- 
+    cosmo = wCDM(H0=params['H0'], Om0=params['Omega_m'], w0=w)
+    
+    theta_rad = np.radians((theta_bins[:-1] + theta_bins[1:])/2)
+    xi = np.zeros_like(theta_rad)
+    
+    f_IGM = params.get('f_IGM', 0.84)
+    b_g = params.get('galaxy_bias', 1.5)
+    b_frb = params.get('FRB_bias', 1.2)
+    A_norm = params.get('A_norm', 1.0)
+    
+    for z_key, (z_centers, z_hist) in dz_distributions.items():
+        if len(z_hist) == 0 or np.max(z_hist) == 0:
+            continue
+            
+        W_gal = z_hist / np.max(z_hist)
+        D_gal = growth(z_centers, w)
+        chi_gal = cosmo.comoving_distance(z_centers).value / 1000.0
+        
+        dz = z_centers[1] - z_centers[0] if len(z_centers) > 1 else 0.1
+        
+        for i, th in enumerate(theta_rad):
+            int_z = 0.0
+            for j, z in enumerate(z_centers):
+                if z_hist[j] == 0:
+                    continue
+                    
+                pk = pk_func(k_vals, z, w)
+                j0_val = j0(np.outer(k_vals, np.array([chi_gal[j]])) * th)
+                integrand = k_vals * pk * j0_val[:,0] * D_gal[j]**2 * W_gal[j]
+                int_k = np.trapz(integrand, k_vals)
+                int_z += int_k * dz
+            
+            xi[i] += b_g * b_frb * A_norm * int_z * 1e-4 * (f_IGM/0.84)
+    
+    return xi
+
 if __name__ == "__main__":
-    main()
+    pipe = FRBAnalysisPipeline()
+    pipe.run()
