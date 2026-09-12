@@ -1,0 +1,28 @@
+# ============================================================
+# FwCC: FRB-w Cross-Correlation Pipeline
+# Requirements for reproducing the analysis in:
+# Pushkin (2026), "FwCC: An FRB-Galaxy Cross-Correlation 
+# Pipeline and its Application to CHIME/FRB and DESI DR1"
+# ============================================================
+
+# --- Core numerical stack ---
+numpy>=1.22.0
+scipy>=1.9.0
+pandas>=1.5.0
+matplotlib>=3.6.0
+
+# --- Astronomy-specific libraries ---
+healpy>=1.16.0           # HEALPix pixelization and spherical maps
+astropy>=5.2.0           # Physical constants and units
+pymaster>=0.1.9          # NaMaster pseudo-C_ell estimator
+pyccl>=2.7.0             # Core Cosmology Library (power spectra)
+
+# --- MCMC inference ---
+emcee>=3.1.0             # Ensemble MCMC sampler
+tqdm>=4.64.0             # Progress bars
+
+# --- Optional: visualization ---
+corner>=2.2.0            # Corner plots for posterior distributions
+
+# --- Optional: Bayesian diagnostics ---
+arviz>=0.15.0            # HDI computation and convergence diagnostics
