@@ -159,7 +159,6 @@ For the earlier preprint describing the basic FwCC formalism, see:
   doi       = {10.5281/zenodo.19200364}
 }
 ```
-A Zenodo DOI for this software release will be added here upon the v2.0.0 release tag.
 
 ## Contributing
 This repository accompanies a submitted manuscript. After publication, bug reports, suggestions, and contributions will be welcome via GitHub Issues and Pull Requests.
