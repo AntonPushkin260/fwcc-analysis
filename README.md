@@ -160,8 +160,7 @@ This project is licensed under the MIT License — see the [LICENSE](https://git
 Anton Pushkin,
 Independent Researcher
  - Email: pushkin2601@mail.ru
- - [ORCID](https://orcid.org/
-0009-0006-3154-4168): 0009-0006-3154-4168
+ - [ORCID](https://orcid.org/0009-0006-3154-4168): 0009-0006-3154-4168
  - GitHub: github.com/AntonPushkin260
 
 Last updated: September 12, 2026
