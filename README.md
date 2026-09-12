@@ -2,6 +2,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![arXiv](https://img.shields.io/badge/arXiv-coming%20soon-lightgrey.svg)]()
+[![ApJ](https://img.shields.io/badge/ApJ-submitted%20Sep%202026-orange.svg)]()
 
 > **Status:** Accompanying code for the manuscript *"FwCC: An FRB–Galaxy Cross-Correlation Pipeline and its Application to CHIME/FRB and DESI DR1"* by Anton Pushkin, submitted to **The Astrophysical Journal** (September 12, 2026). A preprint will be posted on **arXiv (astro-ph.CO)** within a few days. A Zenodo DOI for this software release will be minted upon the first public release tag (v2.0.0).
 
@@ -152,10 +154,10 @@ This project is licensed under the MIT License — see the LICENSE file for deta
 
 
 ## Contact
-Anton Pushkin
+Anton Pushkin,
 Independent Researcher
-Email: pushkin2601@mail.ru
-ORCID: 0009-0006-3154-4168
-GitHub: github.com/AntonPushkin260
+ - Email: pushkin2601@mail.ru
+ - ORCID: 0009-0006-3154-4168
+ - GitHub: github.com/AntonPushkin260
 
 Last updated: September 12, 2026
