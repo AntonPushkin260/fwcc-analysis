@@ -125,6 +125,7 @@ output_FwCC/
 
 ## Citation
 If you use this code in your research, please cite the accompanying paper:
+```
 @article{Pushkin2026,
   author  = {Pushkin, Anton},
   title   = {{FwCC: An FRB--Galaxy Cross-Correlation Pipeline and its
@@ -133,8 +134,10 @@ If you use this code in your research, please cite the accompanying paper:
   year    = {2026},
   note    = {Submitted; arXiv preprint forthcoming}
 }
+```
 
 For the earlier preprint describing the basic FwCC formalism, see:
+```
 @misc{Pushkin2026v1,
   author    = {Pushkin, Anton},
   title     = {{Resolving the Dark Energy Crisis with Fast Radio Bursts:
@@ -143,7 +146,7 @@ For the earlier preprint describing the basic FwCC formalism, see:
   year      = {2026},
   doi       = {10.5281/zenodo.19200364}
 }
-
+```
 A Zenodo DOI for this software release will be added here upon the v2.0.0 release tag.
 
 ## Contributing
