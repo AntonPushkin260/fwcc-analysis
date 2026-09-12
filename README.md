@@ -160,6 +160,21 @@ For the earlier preprint describing the basic FwCC formalism, see:
 }
 ```
 
+## Future Plans
+
+This repository currently contains the complete analysis pipeline used for the accompanying ApJ submission. We are actively working on packaging FwCC as a proper Python library for easier installation and integration into other FRB cosmology workflows.
+
+**Planned features:**
+- **PyPI distribution:** `pip install fwcc` for one-command installation
+- **Modular API:** Clean separation of map construction, pseudo-C_ℓ estimation, and MCMC inference
+- **CLI interface:** Command-line tool for common analysis workflows
+- **Extended tracer support:** Built-in loaders for DESI DR2, Euclid, and Rubin/LSST galaxy catalogues
+- **Forward modelling:** Explicit circumgalactic medium (CGM) and halo gas profiles
+- **Documentation:** Full Sphinx-based API documentation with Jupyter notebook tutorials
+- **CI/CD:** Automated testing and continuous integration via GitHub Actions
+
+**Timeline:** We aim to release v3.0.0 as a pip-installable package by Q4 2026.
+
 ## Contributing
 This repository accompanies a submitted manuscript. After publication, bug reports, suggestions, and contributions will be welcome via GitHub Issues and Pull Requests.
 
