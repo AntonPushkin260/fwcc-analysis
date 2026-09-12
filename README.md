@@ -1,11 +1,12 @@
 # FwCC: FRB–w Cross-Correlation Pipeline
 
+[![DOI](https://zenodo.org/badge/1293383709.svg)](https://doi.org/10.5281/zenodo.22725659)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![arXiv](https://img.shields.io/badge/arXiv-coming%20soon-lightgrey.svg)]()
 [![ApJ](https://img.shields.io/badge/ApJ-submitted%20Sep%202026-orange.svg)]()
 
-> **Status:** Accompanying code for the manuscript *"FwCC: An FRB–Galaxy Cross-Correlation Pipeline and its Application to CHIME/FRB and DESI DR1"* by Anton Pushkin, submitted to **The Astrophysical Journal** (September 12, 2026). A preprint will be posted on **arXiv (astro-ph.CO)** within a few days. A Zenodo DOI for this software release will be minted upon the first public release tag (v2.0.0).
+> **Status:** Accompanying code for the manuscript *"FwCC: An FRB–Galaxy Cross-Correlation Pipeline and its Application to CHIME/FRB and DESI DR1"* by Anton Pushkin, submitted to **The Astrophysical Journal** (September 12, 2026). A preprint will be posted on **arXiv (astro-ph.CO)** within a few days. This software release is archived on Zenodo at [10.5281/zenodo.22725659](https://doi.org/10.5281/zenodo.22725659).
 
 ---
 
@@ -124,7 +125,7 @@ output_FwCC/
 
 
 ## Citation
-If you use this code in your research, please cite the accompanying paper:
+If you use this code in your research, please cite the accompanying paper and the software release:
 ```
 @article{Pushkin2026,
   author  = {Pushkin, Anton},
@@ -135,7 +136,18 @@ If you use this code in your research, please cite the accompanying paper:
   note    = {Submitted; arXiv preprint forthcoming}
 }
 ```
-
+**Software:**
+```
+@software{Pushkin2026FwCC_code,
+  author    = {Pushkin, Anton},
+  title     = {{FwCC: FRB-w Cross-Correlation Pipeline}},
+  year      = {2026},
+  publisher = {Zenodo},
+  version   = {2.0.0},
+  doi       = {10.5281/zenodo.22725659},
+  url       = {https://github.com/AntonPushkin260/fwcc-analysis}
+}
+```
 For the earlier preprint describing the basic FwCC formalism, see:
 ```
 @misc{Pushkin2026v1,
