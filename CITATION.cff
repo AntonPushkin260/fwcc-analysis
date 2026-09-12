@@ -32,12 +32,10 @@ keywords:
   - mcmc
 
 abstract: >
-  End-to-end pipeline for measuring the angular cross-correlation
-  between the extragalactic FRB dispersion measure field and
-  foreground galaxy overdensity maps, without assigning point
-  redshifts to individual bursts. Applied to CHIME/FRB Catalogue 2
-  and DESI DR1 tracers for cosmological inference of dark energy
-  equation-of-state parameter w and ionised baryon fraction f_IGM.
+  FwCC: FRB–w Cross-Correlation pipeline. 
+  Measures angular cross-correlation between extragalactic FRB dispersion measures
+  and galaxy overdensity maps without point redshift assignments. 
+  Applied to CHIME/FRB Catalogue 2 and DESI DR1.
 
 references:
   - type: article
