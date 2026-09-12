@@ -1,0 +1,66 @@
+cff-version: 1.2.0
+message: "If you use this software in your research, please cite the accompanying paper and software release."
+
+title: "FwCC: FRB-w Cross-Correlation Pipeline"
+type: software
+
+authors:
+  - family-names: Pushkin
+    given-names: Anton
+    orcid: "https://orcid.org/0009-0006-3154-4168"
+    affiliation: "Independent Researcher"
+
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.22725659"
+    description: "Zenodo DOI for software release v2.0.0"
+
+repository-code: "https://github.com/AntonPushkin260/fwcc-analysis"
+url: "https://github.com/AntonPushkin260/fwcc-analysis"
+
+license: MIT
+version: 2.0.0
+date-released: "2026-09-12"
+
+keywords:
+  - cosmology
+  - fast-radio-bursts
+  - frb
+  - dark-energy
+  - cross-correlation
+  - bayesian-inference
+  - mcmc
+
+abstract: >
+  End-to-end pipeline for measuring the angular cross-correlation
+  between the extragalactic FRB dispersion measure field and
+  foreground galaxy overdensity maps, without assigning point
+  redshifts to individual bursts. Applied to CHIME/FRB Catalogue 2
+  and DESI DR1 tracers for cosmological inference of dark energy
+  equation-of-state parameter w and ionised baryon fraction f_IGM.
+
+references:
+  - type: article
+    title: >
+      FwCC: An FRB-Galaxy Cross-Correlation Pipeline and its Application
+      to CHIME/FRB and DESI DR1
+    authors:
+      - family-names: Pushkin
+        given-names: Anton
+        orcid: "https://orcid.org/0009-0006-3154-4168"
+    year: 2026
+    journal: "The Astrophysical Journal"
+    notes: "Submitted; arXiv preprint forthcoming"
+  
+  - type: software
+    title: >
+      Resolving the Dark Energy Crisis with Fast Radio Bursts:
+      A w-Measurement from CHIME and SDSS Cross-Correlation
+    authors:
+      - family-names: Pushkin
+        given-names: Anton
+    year: 2026
+    identifiers:
+      - type: doi
+        value: "10.5281/zenodo.19200364"
+    notes: "Earlier simplified version of the pipeline"
