@@ -153,7 +153,7 @@ A Zenodo DOI for this software release will be added here upon the v2.0.0 releas
 This repository accompanies a submitted manuscript. After publication, bug reports, suggestions, and contributions will be welcome via GitHub Issues and Pull Requests.
 
 ## License
-This project is licensed under the MIT License — see the LICENSE file for details.
+This project is licensed under the MIT License — see the [LICENSE](https://github.com/AntonPushkin260/fwcc-analysis/blob/main/LICENSE) file for details.
 
 
 ## Contact
